@@ -1,9 +1,8 @@
 from flask import Flask, Response
 import feedparser, requests, os
 from datetime import datetime
-from xml.etree.ElementTree import Element, SubElement, tostring
+import xml.etree.ElementTree as ET
 
-# ✅ Define Flask app first
 app = Flask(__name__)
 
 # -----------------------------
@@ -40,28 +39,34 @@ HF_TOKEN = os.getenv("HF_TOKEN")
 HF_API = "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct"
 UNSPLASH_KEY = os.getenv("UNSPLASH_KEY")
 
+ET.register_namespace('content', "http://purl.org/rss/1.0/modules/content/")
+
 # -----------------------------
 # AI + IMAGE HELPERS
 # -----------------------------
 def rewrite(text):
-    """Use Hugging Face to rewrite article text"""
+    """AI rewrite using Hugging Face"""
+    if not HF_TOKEN:
+        return text
     try:
         res = requests.post(
             HF_API,
             headers={"Authorization": f"Bearer {HF_TOKEN}"},
-            json={"inputs": f"Rewrite this article in a natural, SEO-friendly, human tone:\n\n{text}"}
+            json={"inputs": f"Rewrite this text in an SEO-friendly, natural human style:\n\n{text}"}
         )
         data = res.json()
         if isinstance(data, list) and len(data) > 0:
             rewritten = data[0].get("generated_text", "")
-            if rewritten.strip():
-                return rewritten
+            return rewritten.strip() or text
     except Exception as e:
         print("AI Error:", e)
-    return text or "No content available"
+    return text
+
 
 def get_image(query):
-    """Fallback Unsplash image if original not found"""
+    """Fallback Unsplash image if none found in feed"""
+    if not UNSPLASH_KEY:
+        return None
     try:
         res = requests.get(
             f"https://api.unsplash.com/photos/random?query={query}&orientation=landscape",
@@ -75,87 +80,76 @@ def get_image(query):
     return None
 
 # -----------------------------
-# RSS GENERATION LOGIC
+# RSS GENERATION
 # -----------------------------
 def generate_rss(category):
     feeds = CATEGORIES.get(category.lower())
     if not feeds:
         return None
 
-    root = Element("rss", version="2.0", attrib={"xmlns:content": "http://purl.org/rss/1.0/modules/content/"})
-    channel = SubElement(root, "channel")
+    rss = ET.Element("rss", {
+        "version": "2.0",
+        "xmlns:content": "http://purl.org/rss/1.0/modules/content/"
+    })
+    channel = ET.SubElement(rss, "channel")
 
-    SubElement(channel, "title").text = f"AI Generated RSS - {category.title()}"
-    SubElement(channel, "link").text = f"https://yourapp.onrender.com/rss/{category}"
-    SubElement(channel, "description").text = f"AI rewritten feed for {category.title()} news."
+    ET.SubElement(channel, "title").text = f"AI Generated RSS - {category.title()}"
+    ET.SubElement(channel, "link").text = f"https://storycircle.store/rss/{category}"
+    ET.SubElement(channel, "description").text = f"AI rewritten feed for {category.title()} news."
+    ET.SubElement(channel, "language").text = "en"
 
     for feed_url in feeds:
         f = feedparser.parse(feed_url)
-        for entry in f.entries[:3]:
-            item = SubElement(channel, "item")
-            SubElement(item, "title").text = entry.title
-            SubElement(item, "link").text = entry.link
+        for entry in f.entries[:4]:
+            item = ET.SubElement(channel, "item")
+            ET.SubElement(item, "title").text = entry.title
+            ET.SubElement(item, "link").text = entry.link
+            ET.SubElement(item, "guid").text = entry.link + "#ai"
+            ET.SubElement(item, "pubDate").text = datetime.now().strftime("%a, %d %b %Y %H:%M:%S +0000")
 
-            # --- Content ---
-            original_summary = entry.summary if hasattr(entry, "summary") else entry.title
-            content = rewrite(original_summary)
+            # --- Description ---
+            summary = getattr(entry, "summary", "")
+            if hasattr(entry, "content") and len(entry.content) > 0:
+                summary = entry.content[0].value
+            rewritten = rewrite(summary)
 
-            # Description (short)
-            desc = SubElement(item, "description")
-            desc.text = f"<![CDATA[{content[:300]}]]>"
+            desc = ET.SubElement(item, "description")
+            desc.text = f"<![CDATA[{rewritten[:500]}]]>"
 
-            # Full content (for Infinite CMS)
-            content_encoded = SubElement(item, "{http://purl.org/rss/1.0/modules/content/}encoded")
-            content_encoded.text = f"<![CDATA[{content}]]>"
+            content_encoded = ET.SubElement(item, "{http://purl.org/rss/1.0/modules/content/}encoded")
+            content_encoded.text = f"<![CDATA[{rewritten}]]>"
 
-            # --- Image (original preferred) ---
+            # --- Image (prefer original) ---
             img_url = None
-            if hasattr(entry, "media_content") and len(entry.media_content) > 0:
+            if hasattr(entry, "media_content") and entry.media_content:
                 img_url = entry.media_content[0].get("url")
             elif hasattr(entry, "links"):
                 for link in entry.links:
                     if link.get("type", "").startswith("image"):
                         img_url = link.get("href")
                         break
-
-            # Fallback to Unsplash if missing
             if not img_url:
-                img_url = get_image(f"{category} {entry.title}")
-
+                img_url = get_image(entry.title)
             if img_url:
-                SubElement(item, "enclosure", url=img_url, type="image/jpeg")
+                ET.SubElement(item, "enclosure", {"url": img_url, "type": "image/jpeg"})
 
-            SubElement(item, "pubDate").text = datetime.now().strftime("%a, %d %b %Y %H:%M:%S +0000")
-            SubElement(item, "guid").text = entry.link + "#ai"
+    xml_str = ET.tostring(rss, encoding="utf-8", xml_declaration=True)
+    return xml_str
 
-    xml = tostring(root, encoding="utf-8")
-    return xml
 
 # -----------------------------
 # ROUTES
 # -----------------------------
 @app.route("/")
 def index():
-    return "✅ AI RSS Generator is running. Feeds: /rss/tech, /rss/business, /rss/sports, /rss/health, /rss/entertainment"
+    return "✅ AI RSS Generator running: /rss/tech /rss/business /rss/sports /rss/health /rss/entertainment"
 
 @app.route("/rss/<category>")
-def category_feed(category):
+def feed(category):
     xml = generate_rss(category)
     if xml:
         return Response(xml, mimetype="application/rss+xml")
-    else:
-        return Response(f"Category '{category}' not found.", status=404)
-
-@app.route("/refresh")
-def refresh_all():
-    print("🔁 Refreshing all categories...")
-    for category in CATEGORIES.keys():
-        try:
-            _ = generate_rss(category)
-            print(f"✅ Refreshed {category}")
-        except Exception as e:
-            print(f"⚠️ Error refreshing {category}: {e}")
-    return "All categories refreshed successfully!"
+    return Response("Category not found", status=404)
 
 # -----------------------------
 # RUN
