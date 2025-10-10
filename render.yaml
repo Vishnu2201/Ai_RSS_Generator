@@ -1,0 +1,23 @@
+services:
+  - type: web
+    name: ai-rss-generator
+    env: python
+    plan: free
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python main.py"
+    envVars:
+      - key: HF_TOKEN
+        sync: false
+      - key: UNSPLASH_KEY
+        sync: false
+
+  - type: cron
+    name: ai-rss-cron
+    env: python
+    plan: free
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python refresh.py"
+    schedule: "0 */6 * * *"   # every 6 hours
+    envVars:
+      - key: BASE_URL
+        value: https://yourworker.onrender.com
