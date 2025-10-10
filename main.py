@@ -44,6 +44,7 @@ UNSPLASH_KEY = os.getenv("UNSPLASH_KEY")
 # AI + IMAGE HELPERS
 # -----------------------------
 def rewrite(text):
+    """Use Hugging Face to rewrite article text"""
     try:
         res = requests.post(
             HF_API,
@@ -52,13 +53,15 @@ def rewrite(text):
         )
         data = res.json()
         if isinstance(data, list) and len(data) > 0:
-            return data[0].get("generated_text", "")
+            rewritten = data[0].get("generated_text", "")
+            if rewritten.strip():
+                return rewritten
     except Exception as e:
         print("AI Error:", e)
-    return text
-
+    return text or "No content available"
 
 def get_image(query):
+    """Fallback Unsplash image if original not found"""
     try:
         res = requests.get(
             f"https://api.unsplash.com/photos/random?query={query}&orientation=landscape",
@@ -79,7 +82,7 @@ def generate_rss(category):
     if not feeds:
         return None
 
-    root = Element("rss", version="2.0")
+    root = Element("rss", version="2.0", attrib={"xmlns:content": "http://purl.org/rss/1.0/modules/content/"})
     channel = SubElement(root, "channel")
 
     SubElement(channel, "title").text = f"AI Generated RSS - {category.title()}"
@@ -93,11 +96,32 @@ def generate_rss(category):
             SubElement(item, "title").text = entry.title
             SubElement(item, "link").text = entry.link
 
-            content = rewrite(entry.summary if hasattr(entry, "summary") else entry.title)
-            desc = SubElement(item, "description")
-            desc.text = f"<![CDATA[{content}]]>"
+            # --- Content ---
+            original_summary = entry.summary if hasattr(entry, "summary") else entry.title
+            content = rewrite(original_summary)
 
-            img_url = get_image(entry.title.split()[0])
+            # Description (short)
+            desc = SubElement(item, "description")
+            desc.text = f"<![CDATA[{content[:300]}]]>"
+
+            # Full content (for Infinite CMS)
+            content_encoded = SubElement(item, "{http://purl.org/rss/1.0/modules/content/}encoded")
+            content_encoded.text = f"<![CDATA[{content}]]>"
+
+            # --- Image (original preferred) ---
+            img_url = None
+            if hasattr(entry, "media_content") and len(entry.media_content) > 0:
+                img_url = entry.media_content[0].get("url")
+            elif hasattr(entry, "links"):
+                for link in entry.links:
+                    if link.get("type", "").startswith("image"):
+                        img_url = link.get("href")
+                        break
+
+            # Fallback to Unsplash if missing
+            if not img_url:
+                img_url = get_image(f"{category} {entry.title}")
+
             if img_url:
                 SubElement(item, "enclosure", url=img_url, type="image/jpeg")
 
