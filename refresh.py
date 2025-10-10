@@ -1,7 +1,7 @@
 import requests
 import os
 
-BASE_URL = os.getenv("BASE_URL", "https://yourworker.onrender.com")
+BASE_URL = os.getenv("BASE_URL", "https://yourapp.onrender.com")
 
 def main():
     try:
