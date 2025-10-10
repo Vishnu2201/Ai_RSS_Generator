@@ -1,7 +1,7 @@
 from flask import Flask, Response
 import feedparser, requests, os
 from datetime import datetime
-import xml.etree.ElementTree as ET
+from xml.sax.saxutils import escape
 
 app = Flask(__name__)
 
@@ -39,32 +39,30 @@ HF_TOKEN = os.getenv("HF_TOKEN")
 HF_API = "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct"
 UNSPLASH_KEY = os.getenv("UNSPLASH_KEY")
 
-ET.register_namespace('content', "http://purl.org/rss/1.0/modules/content/")
-
 # -----------------------------
 # AI + IMAGE HELPERS
 # -----------------------------
 def rewrite(text):
-    """AI rewrite using Hugging Face"""
-    if not HF_TOKEN:
-        return text
+    """Rewrite text using Hugging Face API (SEO-friendly)."""
     try:
+        if not HF_TOKEN:
+            return text
         res = requests.post(
             HF_API,
             headers={"Authorization": f"Bearer {HF_TOKEN}"},
-            json={"inputs": f"Rewrite this text in an SEO-friendly, natural human style:\n\n{text}"}
+            json={"inputs": f"Rewrite this article in a natural, SEO-friendly tone:\n\n{text}"}
         )
         data = res.json()
         if isinstance(data, list) and len(data) > 0:
-            rewritten = data[0].get("generated_text", "")
-            return rewritten.strip() or text
+            rewritten = data[0].get("generated_text", "").strip()
+            if rewritten:
+                return rewritten
     except Exception as e:
         print("AI Error:", e)
-    return text
-
+    return text or "No content available"
 
 def get_image(query):
-    """Fallback Unsplash image if none found in feed"""
+    """Get fallback Unsplash image if feed has none."""
     if not UNSPLASH_KEY:
         return None
     try:
@@ -87,55 +85,54 @@ def generate_rss(category):
     if not feeds:
         return None
 
-    rss = ET.Element("rss", {
-        "version": "2.0",
-        "xmlns:content": "http://purl.org/rss/1.0/modules/content/"
-    })
-    channel = ET.SubElement(rss, "channel")
-
-    ET.SubElement(channel, "title").text = f"AI Generated RSS - {category.title()}"
-    ET.SubElement(channel, "link").text = f"https://storycircle.store/rss/{category}"
-    ET.SubElement(channel, "description").text = f"AI rewritten feed for {category.title()} news."
-    ET.SubElement(channel, "language").text = "en"
+    xml = []
+    xml.append('<?xml version="1.0" encoding="utf-8"?>')
+    xml.append('<rss version="2.0" xmlns:content="http://purl.org/rss/1.0/modules/content/">')
+    xml.append("<channel>")
+    xml.append(f"<title>AI Generated RSS - {escape(category.title())}</title>")
+    xml.append(f"<link>https://storycircle.store/rss/{escape(category)}</link>")
+    xml.append(f"<description>AI rewritten feed for {escape(category.title())} news.</description>")
+    xml.append("<language>en</language>")
 
     for feed_url in feeds:
         f = feedparser.parse(feed_url)
-        for entry in f.entries[:4]:
-            item = ET.SubElement(channel, "item")
-            ET.SubElement(item, "title").text = entry.title
-            ET.SubElement(item, "link").text = entry.link
-            ET.SubElement(item, "guid").text = entry.link + "#ai"
-            ET.SubElement(item, "pubDate").text = datetime.now().strftime("%a, %d %b %Y %H:%M:%S +0000")
+        for entry in f.entries[:5]:
+            title = escape(entry.title)
+            link = entry.link
+            summary = getattr(entry, "summary", entry.title)
+            content = rewrite(summary)
 
-            # --- Description ---
-            summary = getattr(entry, "summary", "")
-            if hasattr(entry, "content") and len(entry.content) > 0:
-                summary = entry.content[0].value
-            rewritten = rewrite(summary)
-
-            desc = ET.SubElement(item, "description")
-            desc.text = f"<![CDATA[{rewritten[:500]}]]>"
-
-            content_encoded = ET.SubElement(item, "{http://purl.org/rss/1.0/modules/content/}encoded")
-            content_encoded.text = f"<![CDATA[{rewritten}]]>"
-
-            # --- Image (prefer original) ---
+            # Prefer original feed images
             img_url = None
             if hasattr(entry, "media_content") and entry.media_content:
                 img_url = entry.media_content[0].get("url")
             elif hasattr(entry, "links"):
-                for link in entry.links:
-                    if link.get("type", "").startswith("image"):
-                        img_url = link.get("href")
+                for link_obj in entry.links:
+                    if link_obj.get("type", "").startswith("image"):
+                        img_url = link_obj.get("href")
                         break
             if not img_url:
-                img_url = get_image(entry.title)
+                img_url = get_image(title)
+
+            # Write <item>
+            xml.append("<item>")
+            xml.append(f"<title>{title}</title>")
+            xml.append(f"<link>{link}</link>")
+            xml.append(f"<guid>{link}#ai</guid>")
+            xml.append(f"<pubDate>{datetime.now().strftime('%a, %d %b %Y %H:%M:%S +0000')}</pubDate>")
+
+            # Proper CDATA (not escaped)
+            xml.append(f"<![CDATA[{content[:500]}]]>")
+            xml.append(f"<description><![CDATA[{content[:500]}]]></description>")
+            xml.append(f"<content:encoded><![CDATA[{content}]]></content:encoded>")
+
             if img_url:
-                ET.SubElement(item, "enclosure", {"url": img_url, "type": "image/jpeg"})
+                xml.append(f'<enclosure url="{img_url}" type="image/jpeg" />')
 
-    xml_str = ET.tostring(rss, encoding="utf-8", xml_declaration=True)
-    return xml_str
+            xml.append("</item>")
 
+    xml.append("</channel></rss>")
+    return "\n".join(xml)
 
 # -----------------------------
 # ROUTES
