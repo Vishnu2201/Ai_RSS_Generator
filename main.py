@@ -1,5 +1,5 @@
 from flask import Flask, Response
-import feedparser, requests, os, html
+import feedparser, requests, os, html, re
 from datetime import datetime
 import xml.etree.ElementTree as ET
 
@@ -44,19 +44,23 @@ ET.register_namespace('content', "http://purl.org/rss/1.0/modules/content/")
 # -----------------------------
 # HELPERS
 # -----------------------------
+def clean_html(raw_html):
+    """Remove HTML tags and entities for plain text descriptions."""
+    text = re.sub(r"<[^>]+>", "", raw_html)
+    text = html.unescape(text)
+    return text.strip()
+
+
 def rewrite(text, mode="content"):
-    """Use Hugging Face AI to rewrite title or content."""
+    """Rewrite title or content using Hugging Face AI."""
     if not HF_TOKEN:
         return html.unescape(text)
-    prompt = ""
     if mode == "title":
-        prompt = (
-            f"Rewrite this news headline to be more engaging, SEO-friendly and clear while keeping meaning:\n\n{text}"
-        )
+        prompt = f"Rewrite this news title to be more engaging and SEO-friendly:\n\n{text}"
     else:
         prompt = (
-            "Rewrite this article into a detailed, natural, SEO-optimized summary in 2–4 paragraphs, "
-            "removing ads, unrelated links or navigation text:\n\n" + text
+            "Rewrite this article into a detailed, SEO-optimized summary (3–4 paragraphs), "
+            "formatted as valid HTML with proper paragraphs and a professional tone:\n\n" + text
         )
     try:
         res = requests.post(
@@ -67,15 +71,14 @@ def rewrite(text, mode="content"):
         data = res.json()
         if isinstance(data, list) and len(data) > 0:
             rewritten = data[0].get("generated_text", "").strip()
-            if rewritten:
-                return html.unescape(rewritten)
+            return html.unescape(rewritten)
     except Exception as e:
         print("AI Rewrite Error:", e)
     return html.unescape(text)
 
 
 def get_image(query):
-    """Fallback Unsplash image if no media found."""
+    """Fetch Unsplash image if none found in feed."""
     if not UNSPLASH_KEY:
         return None
     try:
@@ -115,7 +118,7 @@ def generate_rss(category):
         for entry in f.entries[:5]:
             item = ET.SubElement(channel, "item")
 
-            # Rewrite title
+            # Title
             title = rewrite(entry.title, mode="title")
             ET.SubElement(item, "title").text = title
             ET.SubElement(item, "link").text = entry.link
@@ -123,21 +126,23 @@ def generate_rss(category):
             ET.SubElement(item, "pubDate").text = datetime.now().strftime("%a, %d %b %Y %H:%M:%S +0000")
 
             # Content
-            summary = getattr(entry, "summary", "")
+            raw_summary = getattr(entry, "summary", "")
             if hasattr(entry, "content") and len(entry.content) > 0:
-                summary = entry.content[0].value
-            rewritten = rewrite(summary, mode="content")
+                raw_summary = entry.content[0].value
+            rewritten_html = rewrite(raw_summary, mode="content")
+            rewritten_html = html.unescape(rewritten_html)
+            plain_text = clean_html(rewritten_html)
 
-            # Clean HTML entities
-            rewritten = html.unescape(rewritten)
-
-            # Description (short version)
+            # Description (plain text for CMS)
             desc = ET.SubElement(item, "description")
-            desc.text = f"<![CDATA[{rewritten[:800]}]]>"
+            desc.text = f"<![CDATA[{plain_text[:800]}]]>"
 
-            # Full article
+            # Full Content
             content_encoded = ET.SubElement(item, "{http://purl.org/rss/1.0/modules/content/}encoded")
-            content_encoded.text = f"<![CDATA[{rewritten}]]>"
+            content_encoded.text = f"<![CDATA[{rewritten_html}<br><br><i>Source: <a href='{entry.link}'>{entry.link}</a></i>]]>"
+
+            # Optional Author
+            ET.SubElement(item, "author").text = "AI Writer"
 
             # Image
             img_url = None
