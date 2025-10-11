@@ -1,9 +1,8 @@
 from flask import Flask, Response
-import feedparser, requests, os
+import feedparser, requests, os, html
 from datetime import datetime
 import xml.etree.ElementTree as ET
 
-# ✅ Define Flask app first
 app = Flask(__name__)
 
 # -----------------------------
@@ -43,25 +42,22 @@ UNSPLASH_KEY = os.getenv("UNSPLASH_KEY")
 ET.register_namespace('content', "http://purl.org/rss/1.0/modules/content/")
 
 # -----------------------------
-# AI + IMAGE HELPERS
+# HELPERS
 # -----------------------------
 def rewrite(text, mode="content"):
-    """Rewrite title or content using Hugging Face AI."""
+    """Use Hugging Face AI to rewrite title or content."""
     if not HF_TOKEN:
-        return text
+        return html.unescape(text)
     prompt = ""
     if mode == "title":
         prompt = (
-            f"Rewrite this news headline to make it more descriptive, engaging, and SEO-friendly, "
-            f"while keeping the same meaning:\n\n{text}"
+            f"Rewrite this news headline to be more engaging, SEO-friendly and clear while keeping meaning:\n\n{text}"
         )
     else:
         prompt = (
-            "Rewrite the following article into a detailed, natural, SEO-optimized summary "
-            "in 2–4 paragraphs with a professional news tone:\n\n"
-            f"{text}"
+            "Rewrite this article into a detailed, natural, SEO-optimized summary in 2–4 paragraphs, "
+            "removing ads, unrelated links or navigation text:\n\n" + text
         )
-
     try:
         res = requests.post(
             HF_API,
@@ -72,14 +68,14 @@ def rewrite(text, mode="content"):
         if isinstance(data, list) and len(data) > 0:
             rewritten = data[0].get("generated_text", "").strip()
             if rewritten:
-                return rewritten
+                return html.unescape(rewritten)
     except Exception as e:
         print("AI Rewrite Error:", e)
-    return text or "No content available."
+    return html.unescape(text)
 
 
 def get_image(query):
-    """Fallback Unsplash image if none found in feed."""
+    """Fallback Unsplash image if no media found."""
     if not UNSPLASH_KEY:
         return None
     try:
@@ -93,6 +89,7 @@ def get_image(query):
     except Exception as e:
         print("Image error:", e)
     return None
+
 
 # -----------------------------
 # RSS GENERATION
@@ -115,29 +112,34 @@ def generate_rss(category):
 
     for feed_url in feeds:
         f = feedparser.parse(feed_url)
-        for entry in f.entries[:4]:
+        for entry in f.entries[:5]:
             item = ET.SubElement(channel, "item")
 
-            # --- Title (AI rewritten)
-            rewritten_title = rewrite(entry.title, mode="title")
-            ET.SubElement(item, "title").text = rewritten_title
+            # Rewrite title
+            title = rewrite(entry.title, mode="title")
+            ET.SubElement(item, "title").text = title
             ET.SubElement(item, "link").text = entry.link
             ET.SubElement(item, "guid").text = entry.link + "#ai"
             ET.SubElement(item, "pubDate").text = datetime.now().strftime("%a, %d %b %Y %H:%M:%S +0000")
 
-            # --- Description / Content (AI rewritten)
+            # Content
             summary = getattr(entry, "summary", "")
             if hasattr(entry, "content") and len(entry.content) > 0:
                 summary = entry.content[0].value
             rewritten = rewrite(summary, mode="content")
 
-            desc = ET.SubElement(item, "description")
-            desc.text = f"<![CDATA[{rewritten[:900]}]]>"
+            # Clean HTML entities
+            rewritten = html.unescape(rewritten)
 
+            # Description (short version)
+            desc = ET.SubElement(item, "description")
+            desc.text = f"<![CDATA[{rewritten[:800]}]]>"
+
+            # Full article
             content_encoded = ET.SubElement(item, "{http://purl.org/rss/1.0/modules/content/}encoded")
             content_encoded.text = f"<![CDATA[{rewritten}]]>"
 
-            # --- Image (prefer original)
+            # Image
             img_url = None
             if hasattr(entry, "media_content") and entry.media_content:
                 img_url = entry.media_content[0].get("url")
@@ -146,11 +148,8 @@ def generate_rss(category):
                     if link.get("type", "").startswith("image"):
                         img_url = link.get("href")
                         break
-
-            # Fallback to Unsplash if missing
             if not img_url:
                 img_url = get_image(f"{category} {entry.title}")
-
             if img_url:
                 ET.SubElement(item, "enclosure", {"url": img_url, "type": "image/jpeg"})
 
@@ -171,6 +170,7 @@ def feed(category):
     if xml:
         return Response(xml, mimetype="application/rss+xml")
     return Response("Category not found", status=404)
+
 
 # -----------------------------
 # RUN
