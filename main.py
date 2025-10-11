@@ -84,7 +84,6 @@ def generate_rss(category, mixed=False):
     """Generate RSS feed for one category or all combined."""
     feeds = []
     if mixed:
-        # Combine all categories
         for urls in CATEGORIES.values():
             feeds.extend(urls)
     else:
@@ -92,12 +91,13 @@ def generate_rss(category, mixed=False):
         if not feeds:
             return None
 
-    rss = ET.Element("rss", {
-        "version": "2.0",
-        "xmlns:dc": "http://purl.org/dc/elements/1.1/",
-        "xmlns:atom": "http://www.w3.org/2005/Atom",
-        "xmlns:content": "http://purl.org/rss/1.0/modules/content/"
-    })
+    # register namespaces so ElementTree writes them only once
+    ET.register_namespace("dc", "http://purl.org/dc/elements/1.1/")
+    ET.register_namespace("atom", "http://www.w3.org/2005/Atom")
+    ET.register_namespace("content", "http://purl.org/rss/1.0/modules/content/")
+
+    # create plain <rss> root; no manual xmlns declarations
+    rss = ET.Element("rss", {"version": "2.0"})
     channel = ET.SubElement(rss, "channel")
 
     # Metadata
