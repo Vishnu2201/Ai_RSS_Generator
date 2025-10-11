@@ -84,6 +84,7 @@ def generate_rss(category):
     if not feeds:
         return None
 
+    # NOTE: Do NOT pre-register namespaces (ElementTree will handle automatically)
     rss = ET.Element("rss", {
         "version": "2.0",
         "xmlns:dc": "http://purl.org/dc/elements/1.1/",
@@ -92,7 +93,7 @@ def generate_rss(category):
     channel = ET.SubElement(rss, "channel")
 
     # --- Feed metadata ---
-    ET.SubElement(channel, "atom:link", {
+    ET.SubElement(channel, "{http://www.w3.org/2005/Atom}link", {
         "href": f"https://storycircle.store/rss/{category}",
         "rel": "self",
         "type": "application/rss+xml"
@@ -103,6 +104,7 @@ def generate_rss(category):
     ET.SubElement(channel, "language").text = "en"
     ET.SubElement(channel, "copyright").text = "© 2025 StoryCircle News Aggregator"
     ET.SubElement(channel, "docs").text = "https://storycircle.store/about"
+
     image = ET.SubElement(channel, "image")
     ET.SubElement(image, "title").text = "StoryCircle"
     ET.SubElement(image, "link").text = "https://storycircle.store"
@@ -121,15 +123,12 @@ def generate_rss(category):
             rewritten = rewrite(summary)
             clean_summary = clean_html(rewritten)
 
-            # Item fields
             ET.SubElement(item, "title").text = title
             desc = ET.SubElement(item, "description")
             desc.text = f"<![CDATA[{clean_summary[:850]}]]>"
             ET.SubElement(item, "link").text = entry.link
             ET.SubElement(item, "guid").text = entry.link
             ET.SubElement(item, "pubDate").text = datetime.now().strftime("%a, %d %b %Y %H:%M:%S +0530")
-
-            # dc:creator
             ET.SubElement(item, "{http://purl.org/dc/elements/1.1/}creator").text = "StoryCircle AI Writer"
 
             # Image
@@ -150,11 +149,11 @@ def generate_rss(category):
                     "length": "0"
                 })
 
-    # --- Pretty print ---
+    # Pretty-print XML
     rough_string = ET.tostring(rss, "utf-8")
     reparsed = minidom.parseString(rough_string)
-    pretty_xml = reparsed.toprettyxml(indent="  ")
-    return pretty_xml
+    return reparsed.toprettyxml(indent="  ")
+
 
 
 # -----------------------------
