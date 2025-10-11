@@ -1,5 +1,5 @@
 from flask import Flask, Response
-import feedparser, requests, os, html, re
+import feedparser, requests, os, html, re, time, json
 from datetime import datetime
 import xml.etree.ElementTree as ET
 from xml.dom import minidom
@@ -30,20 +30,29 @@ HF_TOKEN = os.getenv("HF_TOKEN")
 HF_API = "https://api-inference.huggingface.co/models/mistralai/Mistral-7B-Instruct"
 UNSPLASH_KEY = os.getenv("UNSPLASH_KEY")
 
+CACHE_EXPIRY = 1800  # 30 minutes
+cache = {}
+
 # -----------------------------
-# HELPERS
+# UTILITIES
 # -----------------------------
 def clean_html(raw_html):
-    """Strip HTML tags and decode entities."""
     text = re.sub(r"<[^>]+>", "", raw_html)
     return html.unescape(text.strip())
 
 
 def rewrite(text, mode="content"):
-    """Rewrite using Hugging Face for SEO-friendly language."""
+    """SEO rewrite using Hugging Face."""
     if not HF_TOKEN:
         return html.unescape(text)
-    prompt = f"Rewrite this {'headline' if mode=='title' else 'news article'} in clear, natural, SEO-optimized English:\n\n{text}"
+
+    seo_keywords = ["2025 Update", "Full Details", "Breaking News", "Explained"]
+    prompt = (
+        f"Rewrite this {'headline' if mode=='title' else 'article'} "
+        f"in clear, natural, SEO-optimized English. Include one of these words: "
+        f"{', '.join(seo_keywords)}\n\n{text}"
+    )
+
     try:
         res = requests.post(
             HF_API,
@@ -56,11 +65,12 @@ def rewrite(text, mode="content"):
             return html.unescape(data[0].get("generated_text", text))
     except Exception as e:
         print("AI Rewrite Error:", e)
+
     return html.unescape(text)
 
 
 def get_image(query):
-    """Fetch relevant Unsplash image if feed has none."""
+    """Fetch Unsplash image if feed image not available."""
     if not UNSPLASH_KEY:
         return None
     try:
@@ -77,11 +87,20 @@ def get_image(query):
     return None
 
 
+def cached_response(key, generator):
+    """Cache XML for 30 minutes."""
+    now = time.time()
+    if key in cache and now - cache[key]["time"] < CACHE_EXPIRY:
+        return cache[key]["data"]
+    data = generator()
+    cache[key] = {"data": data, "time": now}
+    return data
+
+
 # -----------------------------
-# RSS GENERATION
+# RSS GENERATOR
 # -----------------------------
 def generate_rss(category, mixed=False):
-    """Generate RSS feed for one category or all combined."""
     feeds = []
     if mixed:
         for urls in CATEGORIES.values():
@@ -91,19 +110,20 @@ def generate_rss(category, mixed=False):
         if not feeds:
             return None
 
-    # register namespaces so ElementTree writes them only once
     ET.register_namespace("dc", "http://purl.org/dc/elements/1.1/")
     ET.register_namespace("atom", "http://www.w3.org/2005/Atom")
     ET.register_namespace("content", "http://purl.org/rss/1.0/modules/content/")
 
-    # create plain <rss> root; no manual xmlns declarations
     rss = ET.Element("rss", {"version": "2.0"})
     channel = ET.SubElement(rss, "channel")
 
     # Metadata
     feed_title = "StoryCircle - Top Stories" if mixed else f"StoryCircle - {category.title()} News"
     feed_link = "https://storycircle.store"
-    feed_desc = "AI-curated and rewritten latest news across categories." if mixed else f"Latest {category.title()} news rewritten by AI."
+    feed_desc = (
+        "AI-curated and rewritten latest news across categories."
+        if mixed else f"AI rewritten {category.title()} stories from top sources."
+    )
 
     ET.SubElement(channel, "{http://www.w3.org/2005/Atom}link", {
         "href": f"https://storycircle.store/rssfeed{'stopstories' if mixed else category}.cms",
@@ -114,7 +134,7 @@ def generate_rss(category, mixed=False):
     ET.SubElement(channel, "link").text = feed_link
     ET.SubElement(channel, "description").text = feed_desc
     ET.SubElement(channel, "language").text = "en-gb"
-    ET.SubElement(channel, "copyright").text = "Copyright: © 2025 StoryCircle Media"
+    ET.SubElement(channel, "copyright").text = "© 2025 StoryCircle Media"
     ET.SubElement(channel, "docs").text = "https://storycircle.store/docs/rss"
 
     image = ET.SubElement(channel, "image")
@@ -122,22 +142,22 @@ def generate_rss(category, mixed=False):
     ET.SubElement(image, "link").text = feed_link
     ET.SubElement(image, "url").text = "https://storycircle.store/static/logo.png"
 
-    # Collect and process articles
+    # Articles
     count = 0
     for feed_url in feeds:
         f = feedparser.parse(feed_url)
-        for entry in f.entries[:4]:  # limit to avoid overfilling
+        for entry in f.entries[:5]:
             item = ET.SubElement(channel, "item")
 
             title = rewrite(entry.title, mode="title")
             summary = getattr(entry, "summary", "")
             if hasattr(entry, "content") and entry.content:
                 summary = entry.content[0].value
-
             rewritten = rewrite(summary)
             clean_summary = clean_html(rewritten)
             pub_date = datetime.now().strftime("%a, %d %b %Y %H:%M:%S +0530")
 
+            # TOI-style order
             ET.SubElement(item, "title").text = title
             desc = ET.SubElement(item, "description")
             desc.text = f"<![CDATA[{clean_summary[:600]}]]>"
@@ -146,11 +166,10 @@ def generate_rss(category, mixed=False):
             ET.SubElement(item, "pubDate").text = pub_date
             ET.SubElement(item, "{http://purl.org/dc/elements/1.1/}creator").text = "StoryCircle AI Desk"
 
-            # content:encoded
             content_encoded = ET.SubElement(item, "{http://purl.org/rss/1.0/modules/content/}encoded")
             content_encoded.text = f"<![CDATA[<p>{clean_summary}</p>]]>"
 
-            # Image handling
+            # Image
             img_url = None
             if hasattr(entry, "media_content") and entry.media_content:
                 img_url = entry.media_content[0].get("url")
@@ -167,13 +186,13 @@ def generate_rss(category, mixed=False):
                     "type": "image/jpeg",
                     "length": "0"
                 })
+
             count += 1
             if mixed and count >= 20:
                 break
         if mixed and count >= 20:
             break
 
-    # Pretty-format XML
     xml_str = ET.tostring(rss, encoding="utf-8")
     reparsed = minidom.parseString(xml_str)
     formatted_xml = reparsed.toprettyxml(indent="", newl="\n")
@@ -186,13 +205,13 @@ def generate_rss(category, mixed=False):
 @app.route("/")
 def index():
     return """
-    ✅ StoryCircle RSS Feed Generator Ready.<br><br>
-    Try:<br>
+    ✅ StoryCircle RSS Generator<br><br>
+    Feeds:<br>
     <ul>
-        <li><a href='/rssfeedentertainment.cms'>/rssfeedentertainment.cms</a></li>
-        <li><a href='/rssfeedtech.cms'>/rssfeedtech.cms</a></li>
-        <li><a href='/rssfeedbusiness.cms'>/rssfeedbusiness.cms</a></li>
-        <li><a href='/rssfeedstopstories.cms'>/rssfeedstopstories.cms</a> (Combined)</li>
+        <li><a href='/rssfeedentertainment.cms'>Entertainment</a></li>
+        <li><a href='/rssfeedtech.cms'>Tech</a></li>
+        <li><a href='/rssfeedbusiness.cms'>Business</a></li>
+        <li><a href='/rssfeedstopstories.cms'>Top Stories (Combined)</a></li>
     </ul>
     """
 
@@ -203,14 +222,14 @@ def feed(feedpath):
         return Response("Invalid URL", status=404)
 
     category = feedpath.replace("rssfeed", "").replace(".cms", "").strip().lower()
+    key = f"rss_{category}"
     if category == "stopstories":
-        xml = generate_rss(category, mixed=True)
+        xml = cached_response(key, lambda: generate_rss(category, mixed=True))
     else:
-        xml = generate_rss(category)
+        xml = cached_response(key, lambda: generate_rss(category))
 
     if xml:
         return Response(xml, mimetype="application/rss+xml; charset=utf-8")
-
     return Response("Category not found", status=404)
 
 
