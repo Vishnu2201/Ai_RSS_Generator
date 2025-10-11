@@ -1,5 +1,5 @@
 from flask import Flask, Response
-import feedparser, requests, os, html, re, time, json
+import feedparser, requests, os, html, re, time
 from datetime import datetime
 import xml.etree.ElementTree as ET
 from xml.dom import minidom
@@ -34,35 +34,49 @@ CACHE_EXPIRY = 1800  # 30 minutes
 cache = {}
 
 # -----------------------------
-# UTILITIES
+# HELPERS
 # -----------------------------
 def clean_html(raw_html):
+    """Remove HTML tags and decode entities."""
     text = re.sub(r"<[^>]+>", "", raw_html)
     return html.unescape(text.strip())
 
 
 def rewrite(text, mode="content"):
-    """SEO rewrite using Hugging Face."""
+    """Long-form SEO rewrite using Hugging Face."""
     if not HF_TOKEN:
         return html.unescape(text)
 
-    seo_keywords = ["2025 Update", "Full Details", "Breaking News", "Explained"]
+    seo_keywords = ["2025 Update", "Full Details", "Explained", "Complete Guide", "Latest Insights"]
     prompt = (
-        f"Rewrite this {'headline' if mode=='title' else 'article'} "
-        f"in clear, natural, SEO-optimized English. Include one of these words: "
-        f"{', '.join(seo_keywords)}\n\n{text}"
+        f"Rewrite this {'headline' if mode=='title' else 'article'} in a long, engaging, "
+        "human-written style for an online publication. "
+        "If it's an article, expand it into a detailed, structured, factual piece around 2000 words. "
+        "Use clear subheadings, transitions, and examples where relevant. "
+        "Maintain readability and SEO focus. Include phrases like "
+        f"{', '.join(seo_keywords)}.\n\nOriginal text:\n{text}\n\nRewritten version:\n"
     )
 
     try:
         res = requests.post(
             HF_API,
             headers={"Authorization": f"Bearer {HF_TOKEN}"},
-            json={"inputs": prompt},
-            timeout=25
+            json={
+                "inputs": prompt,
+                "parameters": {
+                    "max_new_tokens": 1200,
+                    "temperature": 0.8,
+                    "top_p": 0.9,
+                    "repetition_penalty": 1.1
+                }
+            },
+            timeout=60
         )
         data = res.json()
         if isinstance(data, list) and len(data) > 0:
-            return html.unescape(data[0].get("generated_text", text))
+            generated = data[0].get("generated_text", "").strip()
+            if generated:
+                return html.unescape(generated)
     except Exception as e:
         print("AI Rewrite Error:", e)
 
@@ -117,32 +131,29 @@ def generate_rss(category, mixed=False):
     rss = ET.Element("rss", {"version": "2.0"})
     channel = ET.SubElement(rss, "channel")
 
-    # Metadata
+    # Feed Metadata
     feed_title = "StoryCircle - Top Stories" if mixed else f"StoryCircle - {category.title()} News"
-    feed_link = "https://storycircle.store"
-    feed_desc = (
-        "AI-curated and rewritten latest news across categories."
-        if mixed else f"AI rewritten {category.title()} stories from top sources."
-    )
-
     ET.SubElement(channel, "{http://www.w3.org/2005/Atom}link", {
         "href": f"https://storycircle.store/rssfeed{'stopstories' if mixed else category}.cms",
         "rel": "self",
         "type": "application/rss+xml"
     })
     ET.SubElement(channel, "title").text = feed_title
-    ET.SubElement(channel, "link").text = feed_link
-    ET.SubElement(channel, "description").text = feed_desc
+    ET.SubElement(channel, "link").text = "https://storycircle.store"
+    ET.SubElement(channel, "description").text = (
+        "AI rewritten, SEO-friendly stories across major categories."
+        if mixed else f"AI rewritten {category.title()} stories from top sources."
+    )
     ET.SubElement(channel, "language").text = "en-gb"
     ET.SubElement(channel, "copyright").text = "© 2025 StoryCircle Media"
     ET.SubElement(channel, "docs").text = "https://storycircle.store/docs/rss"
 
     image = ET.SubElement(channel, "image")
     ET.SubElement(image, "title").text = "StoryCircle"
-    ET.SubElement(image, "link").text = feed_link
+    ET.SubElement(image, "link").text = "https://storycircle.store"
     ET.SubElement(image, "url").text = "https://storycircle.store/static/logo.png"
 
-    # Articles
+    # Entries
     count = 0
     for feed_url in feeds:
         f = feedparser.parse(feed_url)
@@ -153,23 +164,26 @@ def generate_rss(category, mixed=False):
             summary = getattr(entry, "summary", "")
             if hasattr(entry, "content") and entry.content:
                 summary = entry.content[0].value
+
             rewritten = rewrite(summary)
             clean_summary = clean_html(rewritten)
+
             pub_date = datetime.now().strftime("%a, %d %b %Y %H:%M:%S +0530")
 
             # TOI-style order
             ET.SubElement(item, "title").text = title
             desc = ET.SubElement(item, "description")
-            desc.text = f"<![CDATA[{clean_summary[:600]}]]>"
+            desc.text = f"<![CDATA[{clean_summary}]]>"
             ET.SubElement(item, "link").text = entry.link
             ET.SubElement(item, "guid").text = entry.link
             ET.SubElement(item, "pubDate").text = pub_date
             ET.SubElement(item, "{http://purl.org/dc/elements/1.1/}creator").text = "StoryCircle AI Desk"
 
+            # Full HTML version
             content_encoded = ET.SubElement(item, "{http://purl.org/rss/1.0/modules/content/}encoded")
             content_encoded.text = f"<![CDATA[<p>{clean_summary}</p>]]>"
 
-            # Image
+            # Image Handling
             img_url = None
             if hasattr(entry, "media_content") and entry.media_content:
                 img_url = entry.media_content[0].get("url")
@@ -211,7 +225,7 @@ def index():
         <li><a href='/rssfeedentertainment.cms'>Entertainment</a></li>
         <li><a href='/rssfeedtech.cms'>Tech</a></li>
         <li><a href='/rssfeedbusiness.cms'>Business</a></li>
-        <li><a href='/rssfeedstopstories.cms'>Top Stories (Combined)</a></li>
+        <li><a href='/rssfeedstopstories.cms'>Top Stories</a></li>
     </ul>
     """
 
@@ -223,6 +237,7 @@ def feed(feedpath):
 
     category = feedpath.replace("rssfeed", "").replace(".cms", "").strip().lower()
     key = f"rss_{category}"
+
     if category == "stopstories":
         xml = cached_response(key, lambda: generate_rss(category, mixed=True))
     else:
@@ -234,7 +249,7 @@ def feed(feedpath):
 
 
 # -----------------------------
-# RUN
+# RUN SERVER
 # -----------------------------
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
